@@ -33,7 +33,7 @@ import { Category } from './products/category.entity';
         store: await redisStore({
           host: process.env.REDIS_HOST || 'localhost',
           port: parseInt(process.env.REDIS_PORT || '6379', 10),
-          db: 0,
+          db: parseInt(process.env.REDIS_DB || '0', 10),
           ttl: 60000,
         }),
       }),

@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { Product } from './product.entity';
@@ -38,10 +38,46 @@ export class ProductsService {
     return this.productsRepository.save(product);
   }
 
-  async updateStock(id: number, quantity: number): Promise<Product> {
-    const product = await this.findOne(id);
-    product.stock = quantity;
-    return this.productsRepository.save(product);
+  /**
+   * Atomically decrements stock, failing if there isn't enough available.
+   * Uses a conditional UPDATE instead of read-then-write to avoid lost
+   * updates when concurrent orders touch the same product.
+   */
+  async decrementStock(id: number, quantity: number, manager?: EntityManager): Promise<void> {
+    const repo = manager ? manager.getRepository(Product) : this.productsRepository;
+    const result = await repo
+      .createQueryBuilder()
+      .update(Product)
+      .set({ stock: () => 'stock - :quantity' })
+      .where('id = :id AND stock >= :quantity', { id, quantity })
+      .setParameters({ quantity })
+      .execute();
+
+    if (result.affected === 0) {
+      const product = await repo.findOne({ where: { id } });
+      if (!product) {
+        throw new NotFoundException(`Product #${id} not found`);
+      }
+      throw new BadRequestException(`Not enough stock for ${product.name}`);
+    }
+  }
+
+  /**
+   * Atomically restores stock (e.g. when an order is cancelled).
+   */
+  async incrementStock(id: number, quantity: number, manager?: EntityManager): Promise<void> {
+    const repo = manager ? manager.getRepository(Product) : this.productsRepository;
+    const result = await repo
+      .createQueryBuilder()
+      .update(Product)
+      .set({ stock: () => 'stock + :quantity' })
+      .where('id = :id', { id, quantity })
+      .setParameters({ quantity })
+      .execute();
+
+    if (result.affected === 0) {
+      throw new NotFoundException(`Product #${id} not found`);
+    }
   }
 
   async remove(id: number): Promise<void> {
@@ -50,7 +86,7 @@ export class ProductsService {
   }
 
   async searchProducts(query: string): Promise<Product[]> {
-    const cacheKey = 'product-search';
+    const cacheKey = `product-search:${query.trim().toLowerCase()}`;
     const cached = await this.cacheManager.get<Product[]>(cacheKey);
     if (cached) {
       return cached;
@@ -98,7 +134,7 @@ export class ProductsService {
       children: [],
     };
 
-    if (category.parentId) {
+    if (category.parent) {
       tree.parent = this.buildCategoryTree(category.parent);
     }
 
